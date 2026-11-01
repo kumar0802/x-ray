@@ -1,222 +1,441 @@
 
-import streamlit as st
-import tensorflow as tf
+import os
 import numpy as np
-from PIL import Image
+import pandas as pd
+import tensorflow as tf
+
 from pathlib import Path
+from sklearn.model_selection import train_test_split
+from sklearn.utils.class_weight import compute_class_weight
+from sklearn.metrics import classification_report, confusion_matrix
 
-# -----------------------------
-# PAGE CONFIGURATION
-# -----------------------------
-st.set_page_config(
-    page_title="Chest X-Ray AI",
-    page_icon="🩻",
-    layout="wide"
+# ==========================================
+# 1. CONFIGURATION
+# ==========================================
+
+BASE_DIR = Path("dataset/Coronahack-Chest-XRay-Dataset")
+
+# Change these paths according to your dataset
+IMAGE_DIR = BASE_DIR / "Coronahack-Chest-XRay-Dataset"
+CSV_PATH = BASE_DIR / "Chest_xray_Corona_Metadata.csv"
+
+MODEL_DIR = Path("model")
+MODEL_DIR.mkdir(exist_ok=True)
+
+MODEL_PATH = MODEL_DIR / "chest_xray_model.keras"
+
+IMG_SIZE = 224
+BATCH_SIZE = 32
+EPOCHS = 25
+SEED = 42
+
+CLASS_NAMES = [
+    "Normal",
+    "Pneumonia Bacterial",
+    "Pneumonia Viral"
+]
+
+NUM_CLASSES = 3
+
+tf.keras.utils.set_random_seed(SEED)
+
+# ==========================================
+# 2. CHECK DATASET
+# ==========================================
+
+if not CSV_PATH.exists():
+    raise FileNotFoundError(f"CSV not found: {CSV_PATH}")
+
+if not IMAGE_DIR.exists():
+    raise FileNotFoundError(f"Image folder not found: {IMAGE_DIR}")
+
+df = pd.read_csv(CSV_PATH)
+
+print("\nDataset columns:")
+print(df.columns.tolist())
+
+required_columns = [
+    "X_ray_image_name",
+    "Label",
+    "Label_1_Virus_category"
+]
+
+for column in required_columns:
+    if column not in df.columns:
+        raise ValueError(f"Missing CSV column: {column}")
+
+# ==========================================
+# 3. CREATE THREE CLASS LABELS
+# ==========================================
+
+def get_class(row):
+
+    label = str(row["Label"]).strip().lower()
+
+    category = str(
+        row["Label_1_Virus_category"]
+    ).strip().lower()
+
+    if label == "normal":
+        return 0
+
+    if category == "bacteria":
+        return 1
+
+    if category == "virus":
+        return 2
+
+    # Exclude unknown or unsupported categories
+    return None
+
+
+df["class_id"] = df.apply(get_class, axis=1)
+
+df = df.dropna(subset=["class_id"]).copy()
+
+df["class_id"] = df["class_id"].astype(int)
+
+print("\nClass distribution:")
+print(
+    df["class_id"].value_counts().sort_index()
 )
 
-st.title("🩻 Chest X-Ray Disease Detection")
-st.write("AI-powered chest X-ray image classification")
+# ==========================================
+# 4. FIND IMAGE FILES
+# ==========================================
 
-# -----------------------------
-# MODEL CONFIGURATION
-# -----------------------------
-MODEL_PATH = "model/chest_xray_model.keras"
+print("\nScanning image directory...")
 
-CLASS_NAMES = ["Normal", "Pneumonia Bacterial","Pneumonia Viral"]
+image_extensions = {
+    ".jpg", ".jpeg", ".png", ".bmp", ".gif"
+}
 
-@st.cache_resource
-def load_model():
-    return tf.keras.models.load_model('xray.keras')
+image_map = {}
 
-try:
-    model = load_model()
-    st.success("CNN Model loaded successfully!")
+for path in IMAGE_DIR.rglob("*"):
 
-except Exception as e:
-    st.error(f"Model loading failed: {e}")
-    st.stop()
+    if path.is_file() and path.suffix.lower() in image_extensions:
 
-# Automatically detect input shape
-input_shape = model.inputs[0].shape
+        image_map[path.name] = str(path)
 
-IMG_HEIGHT = int(input_shape[1] or 224)
-IMG_WIDTH = int(input_shape[2] or 224)
-CHANNELS = int(input_shape[3] or 3)
+df["image_path"] = df["X_ray_image_name"].map(image_map)
 
-st.sidebar.header("Model Information")
-st.sidebar.write("Input shape:", str(input_shape))
-st.sidebar.write("Image size:", f"{IMG_WIDTH} x {IMG_HEIGHT}")
-st.sidebar.write("Channels:", CHANNELS)
+df = df.dropna(subset=["image_path"]).copy()
 
-# -----------------------------
-# IMAGE UPLOAD
-# -----------------------------
-uploaded_file = st.file_uploader(
-    "Upload a chest X-ray image",
-    type=["jpg", "jpeg", "png"]
+if df.empty:
+    raise ValueError(
+        "No matching images found. Check IMAGE_DIR and CSV_PATH."
+    )
+
+print("\nAvailable images:")
+print(len(df))
+
+# ==========================================
+# 5. REMOVE DUPLICATE IMAGE RECORDS
+# ==========================================
+
+df = df.drop_duplicates(
+    subset=["image_path"]
+).reset_index(drop=True)
+
+# ==========================================
+# 6. TRAIN / VALIDATION / TEST SPLIT
+# ==========================================
+
+train_df, temp_df = train_test_split(
+    df,
+    test_size=0.30,
+    random_state=SEED,
+    stratify=df["class_id"]
 )
 
-if uploaded_file:
-
-    original_image = Image.open(uploaded_file)
-
-    col1, col2 = st.columns(2)
-
-    with col1:
-        st.subheader("Uploaded X-Ray")
-        st.image(original_image, use_container_width=True)
-
-    if st.button("Analyze X-Ray", type="primary"):
-
-        try:
-            with st.spinner("Analyzing X-ray..."):
-
-                # -----------------------------
-                # IMAGE PREPROCESSING
-                # -----------------------------
-                if CHANNELS == 1:
-                    image = original_image.convert("L")
-                elif CHANNELS == 3:
-                    image = original_image.convert("RGB")
-                else:
-                    raise ValueError(
-                        f"Unsupported channel count: {CHANNELS}"
-                    )
-
-                image = image.resize(
-                    (IMG_WIDTH, IMG_HEIGHT)
-                )
-
-                img_array = np.array(
-                    image, dtype=np.float32
-                )
-
-                if CHANNELS == 1:
-                    img_array = np.expand_dims(
-                        img_array, axis=-1
-                    )
-
-                # Normalize pixels
-                img_array = img_array / 255.0
-
-                # Add batch dimension
-                img_array = np.expand_dims(
-                    img_array, axis=0
-                )
-
-                # -----------------------------
-                # MODEL PREDICTION
-                # -----------------------------
-                predictions = model(
-                    img_array, training=False
-                )
-
-                predictions = np.asarray(predictions)
-
-                probabilities = predictions[0].astype(
-                    np.float32
-                ).flatten()
-
-                # -----------------------------
-                # HANDLE MODEL OUTPUT
-                # -----------------------------
-                if len(probabilities) == 1:
-
-                    # Binary sigmoid output
-                    p = float(probabilities[0])
-
-                    if p < 0 or p > 1:
-                        p = float(tf.math.sigmoid(p).numpy())
-
-                    probabilities = np.array(
-                        [1 - p, p]
-                    )
-
-                else:
-
-                    # Multi-class output
-                    if (
-                        np.any(probabilities < 0)
-                        or np.any(probabilities > 1)
-                        or not np.isclose(
-                            np.sum(probabilities), 1.0,
-                            atol=0.01
-                        )
-                    ):
-                        probabilities = tf.nn.softmax(
-                            probabilities
-                        ).numpy()
-
-                if len(probabilities) != len(CLASS_NAMES):
-                    raise ValueError(
-                        f"Model returns {len(probabilities)} "
-                        f"classes, but CLASS_NAMES contains "
-                        f"{len(CLASS_NAMES)} labels."
-                    )
-
-                predicted_index = int(
-                    np.argmax(probabilities)
-                )
-
-                predicted_class = CLASS_NAMES[
-                    predicted_index
-                ]
-
-                confidence = (
-                    float(probabilities[predicted_index]) * 100
-                )
-
-            # -----------------------------
-            # DISPLAY RESULTS
-            # -----------------------------
-            with col2:
-
-                st.subheader("Prediction Results")
-
-                st.success(
-                    f"Prediction: {predicted_class}"
-                )
-
-                st.metric(
-                    "Prediction Confidence",
-                    f"{confidence:.2f}%"
-                )
-
-                st.subheader("Class Probabilities")
-
-                for i, class_name in enumerate(CLASS_NAMES):
-
-                    score = float(probabilities[i]) * 100
-
-                    st.write(
-                        f"**{class_name}:** {score:.2f}%"
-                    )
-
-                    st.progress(
-                        min(max(float(probabilities[i]), 0), 1)
-                    )
-
-                st.subheader("Prediction Chart")
-
-                chart_data = {
-                    CLASS_NAMES[i]: float(
-                        probabilities[i] * 100
-                    )
-                    for i in range(len(CLASS_NAMES))
-                }
-
-                st.bar_chart(chart_data)
-
-        except Exception as e:
-
-            st.error("Error while analyzing X-ray!")
-
-            st.exception(e)
-
-st.divider()
-
-st.caption(
-    "Educational AI demonstration only. "
-    "This model is not a substitute for professional "
-    "medical diagnosis."
+val_df, test_df = train_test_split(
+    temp_df,
+    test_size=0.50,
+    random_state=SEED,
+    stratify=temp_df["class_id"]
 )
+
+print("\nSplit sizes:")
+print("Training:", len(train_df))
+print("Validation:", len(val_df))
+print("Testing:", len(test_df))
+
+# ==========================================
+# 7. IMAGE PREPROCESSING
+# ==========================================
+
+AUTOTUNE = tf.data.AUTOTUNE
+
+def load_image(path, label):
+
+    image_bytes = tf.io.read_file(path)
+
+    image = tf.io.decode_image(
+        image_bytes,
+        channels=3,
+        expand_animations=False
+    )
+
+    image.set_shape([None, None, 3])
+
+    image = tf.image.resize(
+        image,
+        [IMG_SIZE, IMG_SIZE]
+    )
+
+    image = tf.cast(image, tf.float32) / 255.0
+
+    return image, label
+
+
+def create_dataset(dataframe, training=False):
+
+    paths = dataframe["image_path"].values
+
+    labels = dataframe["class_id"].values
+
+    dataset = tf.data.Dataset.from_tensor_slices(
+        (paths, labels)
+    )
+
+    if training:
+        dataset = dataset.shuffle(
+            len(dataframe),
+            seed=SEED
+        )
+
+    dataset = dataset.map(
+        load_image,
+        num_parallel_calls=AUTOTUNE
+    )
+
+    dataset = dataset.batch(BATCH_SIZE)
+
+    dataset = dataset.prefetch(AUTOTUNE)
+
+    return dataset
+
+
+train_ds = create_dataset(train_df, training=True)
+
+val_ds = create_dataset(val_df)
+
+test_ds = create_dataset(test_df)
+
+# ==========================================
+# 8. CLASS WEIGHTS
+# ==========================================
+
+weights = compute_class_weight(
+    class_weight="balanced",
+    classes=np.arange(NUM_CLASSES),
+    y=train_df["class_id"].values
+)
+
+class_weights = {
+    i: float(weight)
+    for i, weight in enumerate(weights)
+}
+
+print("\nClass weights:")
+print(class_weights)
+
+# ==========================================
+# 9. CNN MODEL ARCHITECTURE
+# ==========================================
+
+data_augmentation = tf.keras.Sequential([
+
+    tf.keras.layers.RandomFlip("horizontal"),
+
+    tf.keras.layers.RandomRotation(0.05),
+
+    tf.keras.layers.RandomZoom(0.10),
+
+])
+
+model = tf.keras.Sequential([
+
+    tf.keras.layers.Input(
+        shape=(IMG_SIZE, IMG_SIZE, 3)
+    ),
+
+    data_augmentation,
+
+    tf.keras.layers.Conv2D(
+        32, (3, 3),
+        activation="relu",
+        padding="same"
+    ),
+
+    tf.keras.layers.BatchNormalization(),
+
+    tf.keras.layers.MaxPooling2D(),
+
+    tf.keras.layers.Conv2D(
+        64, (3, 3),
+        activation="relu",
+        padding="same"
+    ),
+
+    tf.keras.layers.BatchNormalization(),
+
+    tf.keras.layers.MaxPooling2D(),
+
+    tf.keras.layers.Conv2D(
+        128, (3, 3),
+        activation="relu",
+        padding="same"
+    ),
+
+    tf.keras.layers.BatchNormalization(),
+
+    tf.keras.layers.MaxPooling2D(),
+
+    tf.keras.layers.Conv2D(
+        256, (3, 3),
+        activation="relu",
+        padding="same"
+    ),
+
+    tf.keras.layers.BatchNormalization(),
+
+    tf.keras.layers.MaxPooling2D(),
+
+    tf.keras.layers.GlobalAveragePooling2D(),
+
+    tf.keras.layers.Dense(
+        256,
+        activation="relu"
+    ),
+
+    tf.keras.layers.Dropout(0.5),
+
+    tf.keras.layers.Dense(
+        NUM_CLASSES,
+        activation="softmax"
+    )
+
+])
+
+# ==========================================
+# 10. COMPILE MODEL
+# ==========================================
+
+model.compile(
+
+    optimizer=tf.keras.optimizers.Adam(
+        learning_rate=0.0001
+    ),
+
+    loss="sparse_categorical_crossentropy",
+
+    metrics=["accuracy"]
+
+)
+
+model.summary()
+
+# ==========================================
+# 11. CALLBACKS
+# ==========================================
+
+callbacks = [
+
+    tf.keras.callbacks.ModelCheckpoint(
+        str(MODEL_PATH),
+        monitor="val_loss",
+        save_best_only=True,
+        verbose=1
+    ),
+
+    tf.keras.callbacks.EarlyStopping(
+        monitor="val_loss",
+        patience=5,
+        restore_best_weights=True
+    ),
+
+    tf.keras.callbacks.ReduceLROnPlateau(
+        monitor="val_loss",
+        factor=0.5,
+        patience=3,
+        min_lr=1e-7
+    )
+
+]
+
+# ==========================================
+# 12. TRAIN MODEL
+# ==========================================
+
+print("\nStarting CNN training...")
+
+history = model.fit(
+
+    train_ds,
+
+    validation_data=val_ds,
+
+    epochs=EPOCHS,
+
+    class_weight=class_weights,
+
+    callbacks=callbacks
+
+)
+
+# Save final best model
+model.save(MODEL_PATH)
+
+print("\nModel saved:", MODEL_PATH)
+
+# ==========================================
+# 13. MODEL EVALUATION
+# ==========================================
+
+print("\nEvaluating model...")
+
+test_loss, test_accuracy = model.evaluate(test_ds)
+
+print(f"\nTest Loss: {test_loss:.4f}")
+
+print(f"Test Accuracy: {test_accuracy * 100:.2f}%")
+
+# ==========================================
+# 14. CLASSIFICATION REPORT
+# ==========================================
+
+y_true = np.concatenate([
+    labels.numpy()
+    for _, labels in test_ds
+])
+
+y_pred = np.argmax(
+    model.predict(test_ds),
+    axis=1
+)
+
+print("\nClassification Report:")
+
+print(
+    classification_report(
+        y_true,
+        y_pred,
+        labels=[0, 1, 2],
+        target_names=CLASS_NAMES,
+        zero_division=0
+    )
+)
+
+print("\nConfusion Matrix:")
+
+print(
+    confusion_matrix(
+        y_true,
+        y_pred,
+        labels=[0, 1, 2]
+    )
+)
+
+print("\nTraining completed successfully!")
