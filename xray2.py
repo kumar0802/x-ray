@@ -25,7 +25,7 @@ MODEL_PATH = "model/xray.keras"
 
 @st.cache_resource
 def load_model():
-    return tf.keras.models.load_model(MODEL_PATH)
+    return tf.keras.models.load_model('xray.keras')
 
 try:
     model = load_model()
