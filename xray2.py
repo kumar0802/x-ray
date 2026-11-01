@@ -125,7 +125,7 @@ if page == "Single Image Diagnosis":
         st.subheader("2. AI Analysis & Classification")
         
         if uploaded_file is not None:
-            model, err = load_trained_model(MODEL_PATH)
+            model, err = load_trained_model('xray.keras')
             
             if err:
                 st.warning(f"⚠️ Demo Mode: Using Simulated Inference ({err})")
