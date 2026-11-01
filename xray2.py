@@ -16,8 +16,8 @@ from sklearn.metrics import classification_report, confusion_matrix
 BASE_DIR = Path("dataset/Coronahack-Chest-XRay-Dataset")
 
 # Change these paths according to your dataset
-IMAGE_DIR = BASE_DIR / "Coronahack-Chest-XRay-Dataset"
-CSV_PATH = BASE_DIR / "Chest_xray_Corona_Metadata.csv"
+IMAGE_DIR = BASE_DIR / "D:/rahul/Coronahack-Chest-XRay-Dataset"
+CSV_PATH = BASE_DIR / "D:/rahul/Chest_xray_Corona_Metadata.csv"
 
 MODEL_DIR = Path("model")
 MODEL_DIR.mkdir(exist_ok=True)
