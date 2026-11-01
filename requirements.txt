@@ -1,6 +1,7 @@
-matplotlib
-numpy
-streamlit
-pillow
-opencv-python-headless
 tensorflow
+streamlit
+numpy
+pandas
+pillow
+scikit-learn
+matplotlib
