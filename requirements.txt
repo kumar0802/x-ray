@@ -1,7 +1,7 @@
-tensorflow
 streamlit
-numpy
+tensorflow
 pandas
-pillow
+numpy
 scikit-learn
+pillow
 matplotlib
