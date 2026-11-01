@@ -72,7 +72,7 @@ MODEL_PATH = "model/chest_xray_model.keras"
 def load_trained_model(path):
     if os.path.exists(path):
         try:
-            model = tf.keras.models.load_model(path)
+            model = tf.keras.models.load_model('xray.keras')
             return model, None
         except Exception as e:
             return None, str(e)
