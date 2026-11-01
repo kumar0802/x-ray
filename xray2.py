@@ -4,7 +4,7 @@ Run with:  streamlit run app/streamlit_app.py
 """
 
 import streamlit as st
-import torch
+import torch as tf
 import torch.nn as nn
 from torchvision import transforms, models
 from PIL import Image
