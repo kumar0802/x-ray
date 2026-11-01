@@ -21,7 +21,7 @@ st.write("AI-powered chest X-ray image classification")
 # -----------------------------
 # LOAD MODEL
 # -----------------------------
-MODEL_PATH = "model/chest_xray_model.keras"
+MODEL_PATH = "model/xray.keras"
 
 @st.cache_resource
 def load_model():
