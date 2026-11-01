@@ -66,7 +66,6 @@ st.markdown("""
 # ==========================================
 IMG_SIZE = 224
 CLASS_NAMES = ["Normal", "Pneumonia Bacterial", "Pneumonia Viral"]
-MODEL_PATH = "model/chest_xray_model.keras"
 
 @st.cache_resource
 def load_trained_model(path):
