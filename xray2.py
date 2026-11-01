@@ -1,216 +1,115 @@
-import os
-import tempfile
-import numpy as np
-import pandas as pd
-import tensorflow as tf
-import streamlit as st
-from PIL import Image
+"""Streamlit version of train.py.   Run:  streamlit run train_app.py"""
+import json, os
+import numpy as np, pandas as pd, streamlit as st, tensorflow as tf
+from tensorflow.keras import layers
+from sklearn.model_selection import train_test_split
+from sklearn.utils.class_weight import compute_class_weight
+from sklearn.metrics import classification_report, confusion_matrix, roc_auc_score
 
-# ==========================================
-# PAGE CONFIGURATION & STYLING
-# ==========================================
-st.set_page_config(
-    page_title="Chest X-Ray Pneumonia Classifier",
-    page_icon="🩺",
-    layout="wide",
-    initial_sidebar_state="expanded"
-)
+st.set_page_config(page_title="Train X-Ray Model", page_icon="🩻", layout="wide")
+st.title("🩻 Train the chest X-ray classifier")
+SIZE = 224
 
-# Custom CSS styling for medical dashboard look
-st.markdown("""
-<style>
-    .main-header {
-        font-size: 2.2rem;
-        font-weight: 700;
-        color: #0F172A;
-        margin-bottom: 0.2rem;
-    }
-    .sub-header {
-        font-size: 1rem;
-        color: #475569;
-        margin-bottom: 1.5rem;
-    }
-    .metric-card {
-        background-color: #F8FAFC;
-        border-radius: 10px;
-        padding: 16px;
-        border-left: 4px solid #0284C7;
-        box-shadow: 0 1px 3px rgba(0,0,0,0.05);
-    }
-    .class-normal {
-        color: #166534;
-        background-color: #DCFCE7;
-        padding: 4px 12px;
-        border-radius: 16px;
-        font-weight: 600;
-    }
-    .class-bacterial {
-        color: #9A3412;
-        background-color: #FFEDD5;
-        padding: 4px 12px;
-        border-radius: 16px;
-        font-weight: 600;
-    }
-    .class-viral {
-        color: #991B1B;
-        background-color: #FEE2E2;
-        padding: 4px 12px;
-        border-radius: 16px;
-        font-weight: 600;
-    }
-</style>
-""", unsafe_allow_html=True)
+# ---------------- sidebar settings (defaults = your paths from train.py)
+with st.sidebar:
+    st.header("Settings")
+    img_dir = st.text_input("Image folder", "D:/rahul/Coronahack-Chest-XRay-Dataset")
+    csv_path = st.text_input("Metadata CSV", "D:/rahul/Chest_xray_Corona_Metadata.csv")
+    out = st.text_input("Output folder", "model")
+    bs = st.select_slider("Batch size", [8, 16, 32, 64], 32)
+    e1 = st.slider("Epochs: train new head", 1, 15, 8)
+    e2 = st.slider("Epochs: fine-tune top 30 layers", 0, 10, 5)
+    val_frac = st.slider("Validation share of TRAIN", 0.05, 0.30, 0.15)
 
-# ==========================================
-# MODEL & CONSTANTS
-# ==========================================
-IMG_SIZE = 224
-CLASS_NAMES = ["Normal", "Pneumonia Bacterial", "Pneumonia Viral"]
-MODEL_PATH = "model/chest_xray_model.keras"
+# ---------------- 1. metadata -> clean targets
+@st.cache_data(show_spinner="Indexing images...")
+def build_df(csv_path, img_dir):
+    df = pd.read_csv(csv_path, index_col=0)
+    df = df[df.Label_1_Virus_category != "Stress-Smoking"]          # only 2 rows
+    df["target"] = np.where(df.Label == "Normal", "Normal",
+                    np.where(df.Label_1_Virus_category == "Virus", "Viral pneumonia", "Bacterial pneumonia"))
+    paths = {f: os.path.join(r, f) for r, _, fs in os.walk(img_dir) for f in fs}
+    df["path"] = df.X_ray_image_name.map(paths)
+    return df
 
-@st.cache_resource
-def load_trained_model(path):
-    if os.path.exists(path):
-        try:
-            model = tf.keras.models.load_model(path)
-            return model, None
-        except Exception as e:
-            return None, str(e)
-    return None, f"Model file not found at path: `{path}`"
+if not os.path.exists(csv_path): st.error(f"CSV not found: {csv_path}"); st.stop()
+if not os.path.isdir(img_dir): st.error(f"Image folder not found: {img_dir}"); st.stop()
+df = build_df(csv_path, img_dir)
+missing = int(df.path.isna().sum()); df = df.dropna(subset=["path"])
+if df.empty: st.error("No images from the CSV were found in the image folder."); st.stop()
+classes = sorted(df.target.unique()); idx = {c: i for i, c in enumerate(classes)}
 
-def preprocess_image(img_pil):
-    """Preprocess PIL Image for TensorFlow prediction."""
-    img_resized = img_pil.resize((IMG_SIZE, IMG_SIZE))
-    img_array = np.array(img_resized)
-    
-    # Handle Grayscale images by converting to 3 channels
-    if len(img_array.shape) == 2:
-        img_array = np.stack((img_array,) * 3, axis=-1)
-    elif img_array.shape[2] == 4:  # Handle RGBA
-        img_array = img_array[:, :, :3]
-        
-    img_scaled = img_array.astype(np.float32) / 255.0
-    img_batch = np.expand_dims(img_scaled, axis=0)
-    return img_batch
+c = st.columns(4)
+c[0].metric("Images found", f"{len(df):,}"); c[1].metric("Missing on disk", missing)
+c[2].metric("TRAIN", f"{(df.Dataset_type == 'TRAIN').sum():,}"); c[3].metric("TEST", f"{(df.Dataset_type == 'TEST').sum():,}")
+st.bar_chart(pd.crosstab(df.target, df.Dataset_type))
 
-# ==========================================
-# SIDEBAR NAVIGATION
-# ==========================================
-st.sidebar.image("https://img.icons8.com/color/96/x-ray--v1.png", width=64)
-st.sidebar.title("Navigation")
-page = st.sidebar.radio("Go to", ["Single Image Diagnosis", "Batch Metadata Explorer", "Model Diagnostics"])
+# ---------------- helpers
+def make_ds(d, shuffle=False):
+    def load(p, y):
+        im = tf.io.decode_image(tf.io.read_file(p), channels=3, expand_animations=False)
+        return tf.image.resize(im, (SIZE, SIZE)), y
+    ds = tf.data.Dataset.from_tensor_slices((d.path.values, d.target.map(idx).values))
+    if shuffle: ds = ds.shuffle(len(d), seed=42)
+    return ds.map(load, num_parallel_calls=tf.data.AUTOTUNE).batch(bs).prefetch(tf.data.AUTOTUNE)
 
-st.sidebar.markdown("---")
-st.sidebar.subheader("System Info")
-st.sidebar.text("Model Target: 224x224 RGB")
-st.sidebar.text("Classes: 3 (Normal, Bact, Vir)")
+class Live(tf.keras.callbacks.Callback):
+    """Pushes every finished epoch to the page."""
+    def __init__(self, hist, chart, status, bar, total):
+        super().__init__(); self.hist, self.chart, self.status, self.bar, self.total = hist, chart, status, bar, total
+    def on_epoch_end(self, epoch, logs=None):
+        self.hist.append({k: float(logs[k]) for k in ["accuracy", "val_accuracy", "loss", "val_loss"]})
+        h = pd.DataFrame(self.hist)
+        self.chart.line_chart(h[["accuracy", "val_accuracy"]])
+        self.bar.progress(min(len(h) / self.total, 1.0))
+        self.status.write(f"Epoch {len(h)}/{self.total} | loss {logs['loss']:.3f} | val_acc {logs['val_accuracy']:.3f}")
 
-# ==========================================
-# PAGE 1: SINGLE IMAGE DIAGNOSIS
-# ==========================================
-if page == "Single Image Diagnosis":
-    st.markdown('<p class="main-header">🩺 Chest X-Ray AI Diagnostics</p>', unsafe_allow_html=True)
-    st.markdown('<p class="sub-header">Upload a chest radiograph to classify between Normal, Bacterial Pneumonia, and Viral Pneumonia.</p>', unsafe_allow_html=True)
+# ---------------- 2. train
+if st.button("🚀 Start training", type="primary"):
+    os.makedirs(out, exist_ok=True)
+    train_df = df[df.Dataset_type == "TRAIN"]; test_df = df[df.Dataset_type == "TEST"]
+    train_df, val_df = train_test_split(train_df, test_size=val_frac, stratify=train_df.target, random_state=42)
 
-    col1, col2 = st.columns([1, 1], gap="large")
+    aug = tf.keras.Sequential([layers.RandomRotation(0.05), layers.RandomZoom(0.1), layers.RandomContrast(0.1)])
+    base = tf.keras.applications.MobileNetV2((SIZE, SIZE, 3), include_top=False, weights="imagenet", name="backbone")
+    base.trainable = False
+    inp = layers.Input((SIZE, SIZE, 3))
+    x = layers.Rescaling(1 / 127.5, offset=-1)(aug(inp))
+    x = base(x, training=False)
+    x = layers.Dropout(0.3)(layers.GlobalAveragePooling2D(name="gap")(x))
+    model = tf.keras.Model(inp, layers.Dense(len(classes), activation="softmax", name="head")(x))
 
-    with col1:
-        st.subheader("1. Upload Radiograph")
-        uploaded_file = st.file_uploader("Choose an X-Ray image file...", type=["jpg", "jpeg", "png"])
-        
-        if uploaded_file is not None:
-            image = Image.open(uploaded_file)
-            st.image(image, caption="Uploaded Chest X-Ray", use_container_width=True)
+    cw = dict(enumerate(compute_class_weight("balanced", classes=np.arange(len(classes)), y=train_df.target.map(idx).values)))
+    tr, va, te = make_ds(train_df, True), make_ds(val_df), make_ds(test_df)
 
-    with col2:
-        st.subheader("2. AI Analysis & Classification")
-        
-        if uploaded_file is not None:
-            model, err = load_trained_model(MODEL_PATH)
-            
-            if err:
-                st.warning(f"⚠️ Demo Mode: Using Simulated Inference ({err})")
-                # Fallback dummy predictions for demo purposes if model file not found local
-                probs = [0.08, 0.76, 0.16]
-            else:
-                processed_img = preprocess_image(image)
-                probs = model.predict(processed_img)[0]
+    st.subheader("Training progress")
+    bar, status, chart = st.progress(0.0), st.empty(), st.empty()
+    hist = []; live = Live(hist, chart, status, bar, e1 + e2)
 
-            pred_class_idx = int(np.argmax(probs))
-            pred_class_name = CLASS_NAMES[pred_class_idx]
-            confidence = probs[pred_class_idx] * 100
+    def fit(lr, epochs):
+        model.compile(tf.keras.optimizers.Adam(lr), "sparse_categorical_crossentropy", metrics=["accuracy"])
+        model.fit(tr, validation_data=va, epochs=epochs, class_weight=cw, verbose=0,
+                  callbacks=[tf.keras.callbacks.EarlyStopping(patience=3, restore_best_weights=True), live])
 
-            # Result Header Badge
-            if pred_class_idx == 0:
-                badge_html = f'<span class="class-normal">Normal</span>'
-            elif pred_class_idx == 1:
-                badge_html = f'<span class="class-bacterial">Pneumonia Bacterial</span>'
-            else:
-                badge_html = f'<span class="class-viral">Pneumonia Viral</span>'
+    fit(1e-3, e1)                                   # phase 1: train the new head
+    if e2 > 0:
+        base.trainable = True
+        for l in base.layers[:-30]: l.trainable = False
+        fit(1e-5, e2)                               # phase 2: fine-tune the top layers
 
-            st.markdown(f"### Diagnosis Result: {badge_html}", unsafe_allow_html=True)
-            st.metric("Top Class Confidence", f"{confidence:.2f}%")
-            
-            st.markdown("---")
-            st.write("**Probability Distribution across Classes:**")
-            
-            for idx, c_name in enumerate(CLASS_NAMES):
-                score = float(probs[idx])
-                st.write(f"**{c_name}** ({score*100:.1f}%)")
-                st.progress(score)
+    # ---------------- 3. evaluate on held-out TEST set and save
+    with st.spinner("Evaluating on the TEST set..."):
+        probs = model.predict(te, verbose=0)
+    y_true = test_df.target.map(idx).values; y_pred = probs.argmax(1)
+    metrics = {"classification_report": classification_report(y_true, y_pred, target_names=classes, output_dict=True),
+               "confusion_matrix": confusion_matrix(y_true, y_pred).tolist(),
+               "roc_auc_ovr": float(roc_auc_score(y_true, probs, multi_class="ovr")), "classes": classes}
+    json.dump(metrics, open(f"{out}/metrics.json", "w"), indent=2)
+    json.dump(classes, open(f"{out}/class_names.json", "w"))
+    model.save(f"{out}/xray_model.keras")
 
-        else:
-            st.info("👈 Please upload a Chest X-ray image in the left panel to begin classification.")
-
-# ==========================================
-# PAGE 2: BATCH METADATA EXPLORER
-# ==========================================
-elif page == "Batch Metadata Explorer":
-    st.markdown('<p class="main-header">📊 Dataset & Metadata Filter</p>', unsafe_allow_html=True)
-    st.markdown('<p class="sub-header">Load and inspect the CoronaHack metadata catalog.</p>', unsafe_allow_html=True)
-
-    csv_file = st.file_uploader("Upload Metadata CSV (Chest_xray_Corona_Metadata.csv)", type=["csv"])
-
-    if csv_file is not None:
-        df = pd.read_csv(csv_file)
-        st.write(f"**Loaded Records:** {len(df)}")
-        
-        filter_col1, filter_col2 = st.columns(2)
-        with filter_col1:
-            label_filter = st.multiselect("Filter by Label", options=df["Label"].unique(), default=df["Label"].unique())
-        with filter_col2:
-            dataset_type = st.multiselect("Filter by Dataset Type", options=df["Dataset_type"].unique(), default=df["Dataset_type"].unique())
-
-        filtered_df = df[(df["Label"].isin(label_filter)) & (df["Dataset_type"].isin(dataset_type))]
-        
-        st.dataframe(filtered_df, use_container_width=True)
-        st.download_button("Download Filtered CSV", filtered_df.to_csv(index=False), "filtered_metadata.csv")
-    else:
-        st.info("Upload `Chest_xray_Corona_Metadata.csv` to explore category distributions.")
-
-# ==========================================
-# PAGE 3: MODEL DIAGNOSTICS
-# ==========================================
-elif page == "Model Diagnostics":
-    st.markdown('<p class="main-header">📈 Model Training Architecture & Metrics</p>', unsafe_allow_html=True)
-    
-    col1, col2, col3 = st.columns(3)
-    col1.metric("Input Target Resolution", "224 x 224 x 3")
-    col2.metric("Batch Size", "32")
-    col3.metric("Optimizer", "Adam (lr=0.0001)")
-
-    st.markdown("### Model Structure Overview")
-    st.code("""
-    Layer (type)                 Output Shape              Param #   
-    =================================================================
-    InputLayer                   (None, 224, 224, 3)       0         
-    DataAugmentation             (None, 224, 224, 3)       0         
-    Conv2D + BatchNorm + MaxPool (None, 112, 112, 32)      960       
-    Conv2D + BatchNorm + MaxPool (None, 56, 56, 64)        18,560    
-    Conv2D + BatchNorm + MaxPool (None, 28, 28, 128)       73,856    
-    Conv2D + BatchNorm + MaxPool (None, 14, 14, 256)       295,168   
-    GlobalAveragePooling2D       (None, 256)               0         
-    Dense + Dropout (0.5)        (None, 256)               65,792    
-    Dense (Softmax Output)       (None, 3)                 771       
-    =================================================================
-    """, language="text")
+    st.success(f"Done. Model and metrics saved in '{out}/'. Now run: streamlit run app.py")
+    st.metric("Test ROC-AUC (one-vs-rest)", f"{metrics['roc_auc_ovr']:.3f}")
+    st.dataframe(pd.DataFrame(metrics["classification_report"]).T.round(3), use_container_width=True)
+    st.subheader("Confusion matrix (rows = true, columns = predicted)")
+    st.dataframe(pd.DataFrame(metrics["confusion_matrix"], index=classes, columns=classes))
