@@ -1,81 +1,101 @@
-"""Launch with:  streamlit run app.py"""
-import json, os
-import numpy as np, pandas as pd, streamlit as st
+import streamlit as st
+import tensorflow as tf
+from tensorflow.keras import layers
+import numpy as np
+import pandas as pd
+import json
+import os
 from PIL import Image
-from matplotlib import cm
 
-st.set_page_config(page_title="Chest X-Ray Classifier", page_icon="🩻", layout="wide")
-CSV, MODEL_DIR, SIZE = "Chest_xray_Corona_Metadata.csv", "model", 224
+# Page Configuration
+st.set_page_config(
+    page_title="Chest X-Ray Pneumonia Classifier",
+    page_icon="🩻",
+    layout="wide"
+)
 
-@st.cache_data
-def load_meta():
-    d = pd.read_csv(CSV, index_col=0).rename(columns={"Label_1_Virus_category": "Type", "Label_2_Virus_category": "Sub-type"})
-    d["Label"] = d.Label.replace({"Pnemonia": "Pneumonia"})
-    d["Type"] = d.Type.fillna("None (normal)"); return d
+OUT = "model"
+MODEL_PATH = os.path.join(OUT, "xray_model.keras")
+METRICS_PATH = os.path.join(OUT, "metrics.json")
+CLASSES_PATH = os.path.join(OUT, "class_names.json")
+SIZE = 224
 
 @st.cache_resource
-def load_model():
-    import tensorflow as tf
-    return (tf.keras.models.load_model(f"{MODEL_DIR}/xray_model.keras"),
-            json.load(open(f"{MODEL_DIR}/class_names.json")))
+def load_artifacts():
+    """Load the trained model, class names, and evaluation metrics."""
+    model = tf.keras.models.load_model(MODEL_PATH) if os.path.exists(MODEL_PATH) else None
+    classes = json.load(open(CLASSES_PATH)) if os.path.exists(CLASSES_PATH) else ["Normal", "Bacterial pneumonia", "Viral pneumonia"]
+    metrics = json.load(open(METRICS_PATH)) if os.path.exists(METRICS_PATH) else None
+    return model, classes, metrics
 
-def gradcam(model, arr):
-    import tensorflow as tf
-    bb, gap, head = model.get_layer("backbone"), model.get_layer("gap"), model.get_layer("head")
-    x = tf.convert_to_tensor(arr[None] / 127.5 - 1.0, tf.float32)
-    with tf.GradientTape() as tape:
-        f = bb(x, training=False); tape.watch(f)
-        p = head(gap(f)); loss = p[:, tf.argmax(p[0])]
-    w = tf.reduce_mean(tape.gradient(loss, f), (1, 2), keepdims=True)
-    cam = tf.nn.relu(tf.reduce_sum(w * f, -1))[0].numpy()
-    return cam / (cam.max() + 1e-8)
+model, classes, metrics = load_artifacts()
 
-page = st.sidebar.radio("Navigate", ["Overview", "Data Explorer", "Predict", "Model Performance"])
-st.sidebar.warning("Educational project. Not a medical device and not for diagnosis.")
-meta = load_meta()
+# App Header
+st.title("🩻 Chest X-Ray Pneumonia Classification")
+st.markdown("Classify chest X-ray scans into **Normal**, **Bacterial Pneumonia**, or **Viral Pneumonia** using a fine-tuned MobileNetV2 model.")
 
-if page == "Overview":
-    st.title("🩻 Chest X-Ray Pneumonia Classifier")
-    st.write("Deep-learning capstone: MobileNetV2 transfer learning classifies chest X-rays as "
-             "**Normal**, **Bacterial pneumonia** or **Viral pneumonia**, with Grad-CAM heatmaps showing what the model looked at.")
-    c = st.columns(4)
-    c[0].metric("Images", f"{len(meta):,}"); c[1].metric("Train", f"{(meta.Dataset_type=='TRAIN').sum():,}")
-    c[2].metric("Test", f"{(meta.Dataset_type=='TEST').sum():,}"); c[3].metric("Pneumonia share", f"{(meta.Label=='Pneumonia').mean():.0%}")
+# Sidebar Navigation
+app_mode = st.sidebar.selectbox("Navigation", ["Image Prediction", "Model Performance & Metrics"])
 
-elif page == "Data Explorer":
-    st.header("Metadata explorer")
-    split = st.radio("Split", ["All", "TRAIN", "TEST"], horizontal=True)
-    d = meta if split == "All" else meta[meta.Dataset_type == split]
-    a, b = st.columns(2)
-    a.subheader("Label"); a.bar_chart(d.Label.value_counts())
-    b.subheader("Pneumonia type"); b.bar_chart(d[d.Label == "Pneumonia"].Type.value_counts())
-    st.subheader("Rare sub-labels"); st.dataframe(d["Sub-type"].value_counts().rename("images"))
-    st.dataframe(d.head(200), use_container_width=True)
+---
 
-elif page == "Predict":
-    st.header("Upload a chest X-ray")
-    if not os.path.exists(f"{MODEL_DIR}/xray_model.keras"):
-        st.error("No trained model found. Run `python train.py <image_folder>` first."); st.stop()
-    up = st.file_uploader("X-ray image", type=["jpg", "jpeg", "png"])
-    if up:
-        model, classes = load_model()
-        img = Image.open(up).convert("RGB").resize((SIZE, SIZE)); arr = np.array(img, dtype="float32")
-        probs = model.predict(arr[None], verbose=0)[0]
-        cam = np.array(Image.fromarray((gradcam(model, arr) * 255).astype("uint8")).resize((SIZE, SIZE)))
-        heat = (cm.jet(cam / 255.0)[..., :3] * 255).astype("uint8")
-        over = (0.6 * arr + 0.4 * heat).astype("uint8")
-        c1, c2, c3 = st.columns(3)
-        c1.image(img, caption="Input"); c2.image(over, caption="Grad-CAM")
-        c3.subheader(classes[int(probs.argmax())]); c3.write(f"Confidence: {probs.max():.1%}")
-        c3.bar_chart(pd.Series(probs, index=classes))
+if app_mode == "Image Prediction":
+    st.header("Chest X-Ray Inference")
+    
+    if model is None:
+        st.warning(f"⚠️ Model not found at `{MODEL_PATH}`. Please run your training script first to generate the saved model artifacts.")
+    else:
+        uploaded_file = st.file_uploader("Upload a chest X-ray image...", type=["jpg", "jpeg", "png"])
+        
+        if uploaded_file is not None:
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                image = Image.open(uploaded_file).convert("RGB")
+                st.image(image, caption="Uploaded X-Ray", use_column_width=True)
+            
+            with col2:
+                st.subheader("Prediction Results")
+                with st.spinner("Analyzing image..."):
+                    # Preprocess image to match training pipeline
+                    img_resized = image.resize((SIZE, SIZE))
+                    img_array = np.array(img_resized)
+                    img_tensor = tf.convert_to_tensor(img_array, dtype=tf.float32)
+                    img_tensor = tf.expand_dims(img_tensor, 0)
+                    
+                    # Model Inference
+                    preds = model.predict(img_tensor)[0]
+                    pred_idx = np.argmax(preds)
+                    pred_class = classes[pred_idx]
+                    confidence = preds[pred_idx] * 100
+                    
+                    # Display Results
+                    st.success(f"**Prediction:** {pred_class}")
+                    st.info(f"**Confidence:** {confidence:.2f}%")
+                    
+                    st.markdown("### Class Probabilities")
+                    for c, p in zip(classes, preds):
+                        st.progress(float(p), text=f"{c}: {p*100:.2f}%")
 
-else:
-    st.header("Held-out test performance")
-    path = f"{MODEL_DIR}/metrics.json"
-    if not os.path.exists(path):
-        st.info("Train the model first (`python train.py <image_folder>`)."); st.stop()
-    m = json.load(open(path)); st.metric("ROC-AUC (one-vs-rest)", f"{m['roc_auc_ovr']:.3f}")
-    rep = pd.DataFrame(m["classification_report"]).T
-    st.dataframe(rep.round(3), use_container_width=True)
-    st.subheader("Confusion matrix (rows = true, columns = predicted)")
-    st.dataframe(pd.DataFrame(m["confusion_matrix"], index=m["classes"], columns=m["classes"]))
+---
+
+elif app_mode == "Model Performance & Metrics":
+    st.header("📊 Evaluation & Test Metrics")
+    
+    if metrics is None:
+        st.warning(f"⚠️ Metrics file not found at `{METRICS_PATH}`. Please run training to generate evaluation metrics.")
+    else:
+        col1, col2 = st.columns(2)
+        with col1:
+            st.metric("ROC-AUC (OvR)", f"{metrics.get('roc_auc_ovr', 0):.4f}")
+        with col2:
+            st.metric("Total Classes", len(classes))
+            
+        st.subheader("Classification Report")
+        report_df = pd.DataFrame(metrics["classification_report"]).transpose()
+        st.dataframe(report_df, use_container_width=True)
+        
+        st.subheader("Confusion Matrix")
+        cm = np.array(metrics["confusion_matrix"])
+        cm_df = pd.DataFrame(cm, index=classes, columns=classes)
+        st.dataframe(cm_df, use_container_width=True)
