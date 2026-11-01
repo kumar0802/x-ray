@@ -44,7 +44,7 @@ tf.keras.utils.set_random_seed(SEED)
 # ==========================================
 
 if not CSV_PATH.exists():
-    raise FileNotFoundError(f"CSV not found: {CSV_PATH}")
+    raise FileNotFoundError(f"CSV not found: {Chest_xray_Corona_Metadata.csv}")
 
 if not IMAGE_DIR.exists():
     raise FileNotFoundError(f"Image folder not found: {IMAGE_DIR}")
