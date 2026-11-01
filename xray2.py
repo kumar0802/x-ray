@@ -22,7 +22,7 @@ st.write("AI-powered chest X-ray image classification")
 # -----------------------------
 MODEL_PATH = "model/chest_xray_model.keras"
 
-CLASS_NAMES = ["Normal", "Pneumonia"]
+CLASS_NAMES = ["Normal", "Pneumonia Bacterial","Pneumonia Viral"]
 
 @st.cache_resource
 def load_model():
